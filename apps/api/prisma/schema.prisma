@@ -1,0 +1,249 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Company ─────────────────────────────────────────────────────────────────
+
+model Company {
+  id          String   @id @default(cuid())
+  name        String
+  linkedinUrl String?  @unique @map("linkedin_url")
+  linkedinId  String?  @unique @map("linkedin_id")
+  industry    String?
+  size        String?
+  website     String?
+  location    String?
+  description String?
+  logoUrl     String?  @map("logo_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  persons Person[]
+
+  @@map("companies")
+}
+
+// ─── Niche ───────────────────────────────────────────────────────────────────
+// Three fixed niches: Abogados, Recruiters, Otros
+// A person belongs to exactly one niche (nullable = not yet classified).
+
+model Niche {
+  id          String   @id @default(cuid())
+  slug        String   @unique // "abogados" | "recruiters" | "otros"
+  name        String   @unique // "Abogados" | "Recruiters" | "Otros"
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  persons         Person[]
+  researchPlans   ResearchPlan[]
+
+  @@map("niches")
+}
+
+// ─── Person ───────────────────────────────────────────────────────────────────
+
+model Person {
+  id               String   @id @default(cuid())
+  // LinkedIn identifiers
+  linkedinId       String?  @unique @map("linkedin_id")
+  linkedinUrl      String   @unique @map("linkedin_url")
+  publicIdentifier String?  @map("public_identifier")
+  // Basic info
+  firstName        String   @map("first_name")
+  lastName         String   @map("last_name")
+  headline         String?
+  about            String?
+  photoUrl         String?  @map("photo_url")
+  // Contact
+  email            String?
+  phone            String?
+  // Location
+  location         String?
+  city             String?
+  country          String?
+  countryCode      String?  @map("country_code")
+  // Current position (denormalized for fast reads)
+  jobTitle         String?  @map("job_title")
+  companyId        String?  @map("company_id")
+  // Niche classification (one per person)
+  nicheId          String?  @map("niche_id")
+  // COS state
+  layer            Int      @default(1)
+  status           PersonStatus @default(CONNECTED)
+  tags             String[] @default([])
+  notes            String?
+  // Interaction tracking
+  lastContactedAt  DateTime? @map("last_contacted_at")  // last OUTBOUND interaction
+  lastRespondedAt  DateTime? @map("last_responded_at")  // last INBOUND interaction
+  nextFollowUpAt   DateTime? @map("next_follow_up_at")  // scheduled next touch
+  followUpCount    Int       @default(0) @map("follow_up_count")
+  // Source tracking
+  source           PersonSource @default(MANUAL_IMPORT) @map("source")
+  linkedinConnectedOn DateTime? @map("linkedin_connected_on") // from CSV
+  // Import metadata
+  importedAt       DateTime  @default(now()) @map("imported_at")
+  lastScrapedAt    DateTime? @map("last_scraped_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  company      Company?      @relation(fields: [companyId], references: [id])
+  niche        Niche?        @relation(fields: [nicheId], references: [id])
+  interactions Interaction[]
+
+  @@map("persons")
+}
+
+// ─── Interaction ─────────────────────────────────────────────────────────────
+// One record per message sent or received in a LinkedIn conversation.
+// "Proposed" messages exist before they are sent — they are the AI draft.
+
+model Interaction {
+  id              String           @id @default(cuid())
+  personId        String           @map("person_id")
+  // Message content
+  type            InteractionType
+  direction       InteractionDirection
+  proposedMessage String?          @map("proposed_message") // AI-generated draft
+  editedMessage   String?          @map("edited_message")   // user-edited version (if changed)
+  finalMessage    String?          @map("final_message")    // what was actually sent/received
+  // Status lifecycle
+  status          InteractionStatus @default(PROPOSED)
+  // Scheduling
+  scheduledFor    DateTime?        @map("scheduled_for")   // when this should be sent
+  sentAt          DateTime?        @map("sent_at")
+  // Metadata
+  notes           String?
+  metadata        Json?            // extra context (e.g. which research questions were asked)
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  person Person @relation(fields: [personId], references: [id])
+
+  @@map("interactions")
+}
+
+// ─── Research Plan ───────────────────────────────────────────────────────────
+// One plan per niche. Shared across all contacts in that niche.
+
+model ResearchPlan {
+  id          String   @id @default(cuid())
+  nicheId     String   @unique @map("niche_id")
+  title       String   // e.g. "Arquitectura Empresarial: Firmas de Abogados"
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  niche     Niche              @relation(fields: [nicheId], references: [id])
+  questions ResearchQuestion[]
+
+  @@map("research_plans")
+}
+
+// ─── Research Question ───────────────────────────────────────────────────────
+
+model ResearchQuestion {
+  id             String               @id @default(cuid())
+  planId         String               @map("plan_id")
+  order          Int                  // display and execution order
+  question       String
+  context        String?              // why we're asking this / what we hope to learn
+  status         ResearchQuestionStatus @default(OPEN)
+  qualityScore   Int                  @default(0) @map("quality_score") // 0-5, closes at 4+
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  plan    ResearchPlan    @relation(fields: [planId], references: [id])
+  answers ResearchAnswer[]
+
+  @@map("research_questions")
+}
+
+// ─── Research Answer ─────────────────────────────────────────────────────────
+
+model ResearchAnswer {
+  id         String   @id @default(cuid())
+  questionId String   @map("question_id")
+  personId   String   @map("person_id")
+  content    String
+  quality    Int      @default(3) // 1-5 rating
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  question ResearchQuestion @relation(fields: [questionId], references: [id])
+
+  @@map("research_answers")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum PersonStatus {
+  DISCOVERED
+  CONNECTION_REQUESTED
+  CONNECTED
+  INITIAL_MESSAGE_SENT
+  RESPONDED
+  RESEARCH_INVITED       // pitch sent, awaiting response
+  RESEARCH_ACCEPTED      // accepted the interview/survey
+  RESEARCH_IN_PROGRESS   // interview scheduled or underway
+  RESEARCH_COMPLETED     // interview done
+  OPPORTUNITY_IDENTIFIED
+  PROPOSAL_SENT
+  NEGOTIATION
+  CLIENT
+  NO_RESPONSE
+  PAUSED
+  NOT_A_FIT
+  REJECTED
+  DEFERRED
+  LOST
+}
+
+enum PersonSource {
+  MANUAL_IMPORT  // pasted LinkedIn URL one by one
+  CSV_IMPORT     // bulk import from LinkedIn Connections.csv
+  APIFY_IMPORT   // scrape was run
+}
+
+enum InteractionType {
+  INITIAL_CONTACT    // "Hola [Nombre], gracias por conectar"
+  FOLLOW_UP          // follow-up when no response to initial
+  RESEARCH_PITCH     // invitation to a research conversation
+  RESEARCH_FOLLOW_UP // follow-up when no response to pitch
+  RESEARCH_CONFIRM   // confirm date/time of interview
+  RESEARCH_INTERVIEW // the interview questions themselves
+  ARTICLE_DELIVERY   // sending the published article back to them
+  RELATIONSHIP_TOUCH // periodic relationship maintenance
+  INBOUND_RESPONSE   // something they said to us
+  OTHER
+}
+
+enum InteractionDirection {
+  OUTBOUND // we sent it
+  INBOUND  // they sent it
+}
+
+enum InteractionStatus {
+  PROPOSED   // AI generated, not yet sent by user
+  SENT       // sent as-is (no edits)
+  SENT_EDITED // user edited before sending
+  RECEIVED   // inbound message logged
+  SKIPPED    // user chose not to send this
+  CANCELLED  // was scheduled but cancelled
+}
+
+enum ResearchQuestionStatus {
+  OPEN       // no answers yet or not enough quality
+  COVERED    // quality score >= 4, will be skipped in future interviews
+  ARCHIVED   // removed from active rotation
+}
