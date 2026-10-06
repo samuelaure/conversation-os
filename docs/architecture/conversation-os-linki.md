@@ -211,6 +211,22 @@ automatización de LinkedIn ni esperar a resolver nada de infraestructura de rie
 - Mensaje inicial + follow-ups (lo que hoy se copia/pega a mano) pasan a enviarse vía linki, con
   el mismo mecanismo de aprobación previa que ya existe — el LLM propone, se aprueba en el
   dashboard de conversation-os, linki ejecuta.
+
+> **Hallazgo técnico (2026-10-07) — leer el código de linki, no solo su README.** La
+> sincronización de respuestas de LinkedIn (leer lo que contestan) es un no-op en el repo público:
+> `lib/linkedin/runner.ts` lo dice explícitamente en comentario — *"LinkedIn reply detection is a
+> premium feature (AI classifier layer) — no-op without `ee/`"*. La bandeja centralizada
+> (`pages/api/inbox/`) solo envía/recibe **email** (SMTP/IMAP); no existe un endpoint que responda
+> por LinkedIn desde ahí. Lo que sí es funcional y abierto es `lib/linkedin/message.ts` (enviar un
+> mensaje nuevo a una conexión de 1er grado) — la pieza que falta es la de *leer* el hilo.
+>
+> Para tener la conversación completa (ambos lados) en conversation-os sin copiar/pegar, haría
+> falta construir esa lectura de inbox nosotros mismos en el fork — mismo patrón de Playwright que
+> ya usa `message.ts` para enviar, pero navegando `/messaging/thread/...` y extrayendo los mensajes
+> del hilo en vez de escribir uno. Es una pieza de trabajo real, no trivial, y **todavía no está
+> priorizada** frente al resto del pipeline — se decide cuando se compare su valor contra las otras
+> fases, no antes.
+
 - El pitch de investigación y la transición a propuesta de negocio **se quedan fuera de esta
   automatización** — ver Capa 3, no negociable.
 
