@@ -15,6 +15,7 @@ _Escrito 2026-10-07._
 6. [Plan de fases, priorizado por ingreso](#6-plan-de-fases-priorizado-por-acercarte-a-generar-ingreso)
 7. [La rutina manual, para no depender del desarrollo](#7-la-rutina-manual--para-que-el-desarrollo-nunca-te-bloquee)
 8. [Riesgos abiertos y cómo se vigilan](#8-riesgos-abiertos-y-cómo-se-vigilan)
+9. [Plan de absorción de Linki](#9-plan-de-absorción-de-linki)
 
 ## 1. El objetivo real, en una frase
 
@@ -271,3 +272,82 @@ después devuelve ese tiempo, no la condición para empezar.
 | Mensajes genéricos en secuencia automatizada (LinkedIn detecta esto como patrón de bot) | Capa 1 (LLM con contexto real) garantiza variación; nunca plantillas idénticas en bucle |
 | Transición investigación→propuesta percibida como manipuladora | Queda explícitamente en Capa 3, humana, nunca automatizada — es la salvaguarda de confianza de la estrategia |
 | Licencia de linki si algún día se revende conversation-os como producto | Separación de sistemas por API evita mezclar código; el fork se mantiene de uso propio salvo revisión explícita antes de cualquier distribución a terceros |
+
+## 9. Plan de absorción de Linki
+
+**Objetivo explícito:** usar linki ahorra trabajo hoy, pero la propiedad total del software a
+largo plazo importa más que la comodidad de corto plazo. Todo lo que linki ya resuelve en código
+abierto (no la edición `ee/` premium) es candidato a reescribirse dentro de conversation-os
+cuando el ahorro de depender de un sistema externo lo justifique frente a otras prioridades — sin
+comprometer ni reordenar el roadmap de las fases 1-4 solo por este propósito.
+
+Inventario hecho leyendo el código del fork archivo por archivo (no el README), 2026-10-07/08.
+Clasificación por costo real de reescritura, no por tamaño de archivo.
+
+### Absorbible fácil — sin Playwright, portar es casi mecánico
+
+| Pieza de linki | Qué aporta | Por qué es fácil |
+|---|---|---|
+| `lib/apollo.ts` | Cliente Apollo.io: email verificado + status de entregabilidad, y **datos de empresa estructurados** (tecnologías usadas, tamaño, revenue, industria) que ni Apify ni el scraping de LinkedIn dan | Wrapper HTTP sobre una API REST documentada de terceros, sin Playwright — es el candidato de mayor ROI para absorber primero |
+| `lib/crypto.ts` | Cifrado de secretos at-rest (AES-256-GCM, clave derivada vía HKDF) | ~40 líneas reutilizables casi literal en Node/Nest |
+| Modelo `workflows`/`workflow_steps` con **tracks paralelos por canal** (LinkedIn y email avanzan independientes, sincronizados solo por "si responde en cualquier canal, cancela todo") | Decisión de diseño ya validada — evita un refactor caro que linki mismo tuvo que hacer una vez | Vale copiar la decisión, no solo el código; el modelo de datos en sí es una tabla de pasos ordenados simple |
+| Límites diarios por cuenta/acción + ventanas horarias (`isWithinSchedule`, conteo contra logs, guard de última línea antes de cada envío) | La lógica real de seguridad que ya usa el runner — no es cosmética, se aplica de verdad | Puro TypeScript/SQL, sin dependencias de navegador |
+| Ramp-up/warm-up progresivo (`2 × días_activos` hasta el tope) | Warm-up real, aunque **en código abierto solo existe para email, no para LinkedIn** | Mismo motivo — lógica aritmética simple sobre una fecha de inicio |
+
+### Absorbible, trabajo real — depende de Playwright y mantenimiento continuo
+
+Aquí el valor no está en "qué hacer" (trivial) sino en el conocimiento operacional ya pagado con
+incidentes reales en producción de linki — **portar casi literal, incluyendo los comentarios que
+documentan esos incidentes**, en vez de reescribir desde intención:
+
+| Pieza | Conocimiento caro que encapsula |
+|---|---|
+| `lib/linkedin/session.ts` (login + fingerprint) | Fingerprint pinning exacto (viewport/UA/timezone fijos idénticos entre login y runtime); el login headless **no emite la cookie de seat de Sales Nav** hasta navegar explícitamente a `/sales/home` — sin este paso, Sales Nav falla silenciosamente; gestión de browser/contexto con dos incidentes de fuga de procesos Chromium ya resueltos |
+| `lib/linkedin/connect.ts` / `visit.ts` / `message.ts` | Un incidente real de julio 2026: una búsqueda page-wide (no acotada al "top card" del perfil) capturó el link de mensaje de otra persona en un módulo lateral y mandó un mensaje al desconocido equivocado — ya corregido, el fix es el código actual |
+| `lib/linkedin/sync-accepted.ts` | El enfoque anterior (inferir "aceptado" por ausencia en pendientes) estaba **mal en 1275 de 1600 casos** medidos; el algoritmo actual (API Voyager + checksum de pase completo vs. incremental, nunca desmarca en un pull parcial) ya está validado contra ese caso real |
+
+### Evaluar antes de invertir — depende de un prerequisito de negocio, no de dificultad
+
+`lib/linkedin/scraper.ts` y `profile-scrape.ts` (scraping de listas/perfiles de Sales Navigator,
+incluye posts recientes con engagement) solo aportan valor si se opera con una cuenta Sales
+Navigator propia. Sin esa cuenta, no hay nada que absorber aquí todavía — no es una cuestión de
+costo de desarrollo.
+
+### No absorbible sin ver `ee/` — hay que decidir, no asumir
+
+Todo detrás de `premium?.` en el código de linki vive en la carpeta cerrada que ni el fork tiene.
+Para cada una, la decisión real es "construir desde cero en conversation-os" vs. "seguir sin esta
+función por ahora" — nunca "copiar de linki", porque no hay nada que copiar:
+
+- Sincronización del inbox de LinkedIn (ya documentado en la sección 4 — es el hallazgo que motivó
+  investigar esto a fondo).
+- Clasificación por IA de respuestas + auto-followup.
+- Generación de mensajes/emails/InMail por LLM integrada al step de un workflow (distinto de la
+  Fase 1 de este documento, que ya planea LLM generation directamente en conversation-os).
+- Envío de InMail de Sales Navigator.
+
+### Redundante con lo que ya existe — no absorber
+
+El "perfil básico" que produce `lib/linkedin/enrich.ts` (headline, summary, posiciones, skills) es
+el mismo dato que ya trae Apify en conversation-os hoy. No hay valor en reescribirlo.
+
+### Cómo se prioriza esto frente al resto
+
+Este plan de absorción **no reordena las fases 1-4** — es una lista de candidatos que compite por
+el mismo recurso limitado (una sola línea de desarrollo). Cada pieza vive como issue en GitHub
+(`module:linki-bridge` o el módulo de negocio que corresponda) y entra al pipeline cuando se
+decide que vale más que lo siguiente en la lista de fases, no antes. El criterio de decisión es
+siempre el mismo que gobierna todo este documento: qué acerca más rápido a investigación real y a
+ingreso, no qué es más elegante de construir.
+
+Issues abiertos (repo `samuelaure/conversation-os`), todos `priority:later` salvo el marcado:
+
+| Issue | Pieza |
+|---|---|
+| [#1](https://github.com/samuelaure/conversation-os/issues/1) — `priority:next` | Apollo (empresa + email verificado) |
+| [#2](https://github.com/samuelaure/conversation-os/issues/2) | Cifrado de secretos at-rest |
+| [#3](https://github.com/samuelaure/conversation-os/issues/3) | Modelo de tracks paralelos por canal |
+| [#4](https://github.com/samuelaure/conversation-os/issues/4) | Límites diarios, ventanas horarias, warm-up |
+| [#5](https://github.com/samuelaure/conversation-os/issues/5) | `session.ts`/`connect.ts`/`visit.ts`/`message.ts` |
+| [#6](https://github.com/samuelaure/conversation-os/issues/6) | Algoritmo de `sync-accepted.ts` |
+| [#7](https://github.com/samuelaure/conversation-os/issues/7) | Lectura del inbox de LinkedIn (no-op sin `ee/`) |
