@@ -26,6 +26,36 @@ async function main() {
     },
   });
 
+  const taxAdvisors = await prisma.niche.upsert({
+    where: { slug: 'tax-advisors' },
+    update: {},
+    create: {
+      slug: 'tax-advisors',
+      name: 'Tax Advisors',
+      description: 'Asesores fiscales, contables y profesionales de impuestos',
+    },
+  });
+
+  const psicologos = await prisma.niche.upsert({
+    where: { slug: 'psicologos' },
+    update: {},
+    create: {
+      slug: 'psicologos',
+      name: 'Psicólogos',
+      description: 'Psicólogos clínicos, terapeutas y consultas privadas de psicología',
+    },
+  });
+
+  const sexologos = await prisma.niche.upsert({
+    where: { slug: 'sexologos' },
+    update: {},
+    create: {
+      slug: 'sexologos',
+      name: 'Sexólogos',
+      description: 'Sexólogos y terapeutas especializados en salud sexual',
+    },
+  });
+
   const otros = await prisma.niche.upsert({
     where: { slug: 'otros' },
     update: {},
@@ -36,7 +66,7 @@ async function main() {
     },
   });
 
-  console.log(`✅ Niches: ${abogados.name}, ${recruiters.name}, ${otros.name}`);
+  console.log(`✅ Niches: ${abogados.name}, ${recruiters.name}, ${taxAdvisors.name}, ${psicologos.name}, ${sexologos.name}, ${otros.name}`);
 
   // ─── Research Plan: Abogados ─────────────────────────────────────────────
   const existingPlanAbogados = await prisma.researchPlan.findUnique({
