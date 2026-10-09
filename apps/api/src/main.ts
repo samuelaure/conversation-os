@@ -9,7 +9,7 @@ async function bootstrap() {
   app.enableCors();
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
 
-  const port = process.env.PORT ?? 3001;
+  const port = process.env.PORT ?? 3011;
   await app.listen(port);
   console.log(`API running on http://localhost:${port}/api`);
 }
