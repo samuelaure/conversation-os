@@ -96,6 +96,19 @@ function parseLinkedInDate(str: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * The CSV export percent-encodes non-ASCII characters in the URL
+ * (…/in/blanca-li%C3%B1an-...), but the Apify actor returns linkedinUrl
+ * already decoded (…/in/blanca-liñan-...). Comparing/keying on the raw
+ * strings silently fails for every accented name — confirmed against a real
+ * run on 2026-10-10/11: 100 of 477 profiles came back correctly scraped but
+ * unmatched against the CSV map, miscounted as "failed" and missing their
+ * connectedOn date. Decode both sides before any comparison or Map key.
+ */
+function normalizeUrl(url: string): string {
+  try { return decodeURI(url); } catch { return url; }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -153,11 +166,12 @@ async function main() {
 
   // ─── Diff against DB: scrape only new connections, unless --force-all ───
   const existing = await prisma.person.findMany({ select: { linkedinUrl: true } });
-  const existingUrls = new Set(existing.map(p => p.linkedinUrl));
+  const existingUrls = new Set(existing.map(p => normalizeUrl(p.linkedinUrl)));
 
   const candidates = rows.filter(r => r['URL']?.trim() && r['First Name']?.trim());
-  const newCount = candidates.filter(r => !existingUrls.has(r['URL'].trim())).length;
-  const targetRows = forceAll ? candidates : candidates.filter(r => !existingUrls.has(r['URL'].trim()));
+  const isNew = (r: Record<string, string>) => !existingUrls.has(normalizeUrl(r['URL'].trim()));
+  const newCount = candidates.filter(isNew).length;
+  const targetRows = forceAll ? candidates : candidates.filter(isNew);
 
   console.log(`✅ Already in DB: ${candidates.length - newCount}`);
   console.log(`🆕 New connections: ${newCount}`);
@@ -173,7 +187,7 @@ async function main() {
   // Keep the CSV's own fields alongside the scrape result, so the apply step
   // can fall back to them (connectedOn date, raw company/position text) for
   // anything Apify doesn't return.
-  const csvByUrl = new Map(targetRows.map(r => [r['URL'].trim(), {
+  const csvByUrl = new Map(targetRows.map(r => [normalizeUrl(r['URL'].trim()), {
     firstName: r['First Name']?.trim() ?? '',
     lastName: r['Last Name']?.trim() ?? '',
     company: r['Company']?.trim() ?? '',
@@ -201,7 +215,7 @@ async function main() {
 
       const returnedUrls = new Set<string>();
       for (const item of items as Array<Record<string, unknown>>) {
-        const url = item.linkedinUrl as string | undefined;
+        const url = item.linkedinUrl ? normalizeUrl(item.linkedinUrl as string) : undefined;
         if (url) returnedUrls.add(url);
         scraped.push({ ...item, csvData: csvByUrl.get(url ?? '') ?? null });
       }
