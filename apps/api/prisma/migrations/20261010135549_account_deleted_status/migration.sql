@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "PersonStatus" ADD VALUE 'ACCOUNT_DELETED';

@@ -207,6 +207,14 @@ enum PersonStatus {
   REJECTED
   DEFERRED
   LOST
+  // LinkedIn's Connections.csv export only gives a connection date for a
+  // deleted/restricted account (no name, no URL) — kept so the DB total
+  // matches LinkedIn's own connection count 1-1, but excluded from the
+  // default contacts listing (see ContactsService.findAll). Distinct from
+  // PAUSED, which means "I deliberately paused outreach to this person" —
+  // conflating the two made every closed account look like a real pause
+  // decision.
+  ACCOUNT_DELETED
 }
 
 enum PersonSource {

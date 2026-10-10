@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Patch, Body, Param } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Body, Param, Query } from '@nestjs/common';
 import { ContactsService } from './contacts.service';
 import { ImportContactDto } from './dto/import-contact.dto';
 import { UpdateContactStatusDto } from './dto/update-contact-status.dto';
@@ -19,10 +19,13 @@ export class ContactsController {
     return this.contacts.getJobStatus(jobId);
   }
 
-  /** GET /api/contacts — Returns all contacts */
+  /**
+   * GET /api/contacts — Returns all contacts.
+   * Excludes ACCOUNT_DELETED by default; pass ?includeDeleted=true to see them.
+   */
   @Get()
-  async findAll() {
-    return this.contacts.findAll();
+  async findAll(@Query('includeDeleted') includeDeleted?: string) {
+    return this.contacts.findAll(includeDeleted === 'true');
   }
 
   /**
@@ -32,6 +35,16 @@ export class ContactsController {
   @Get('niches')
   async getNiches() {
     return this.contacts.getNiches();
+  }
+
+  /**
+   * GET /api/contacts/connection-count
+   * Total including ACCOUNT_DELETED — matches LinkedIn's own connection count.
+   * Must be declared BEFORE /:id to avoid routing conflict.
+   */
+  @Get('connection-count')
+  async connectionCount() {
+    return { count: await this.contacts.connectionCount() };
   }
 
   /** GET /api/contacts/:id */

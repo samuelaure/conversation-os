@@ -43,11 +43,24 @@ export class ContactsService {
     };
   }
 
-  async findAll() {
+  /**
+   * Excludes ACCOUNT_DELETED by default — LinkedIn's CSV export only gives a
+   * connection date for a closed/restricted account (no name, no profile),
+   * so they're kept as rows (connectionCount() below counts them, to match
+   * LinkedIn's own total) but have nothing actionable and would otherwise
+   * clutter every working list. Pass includeDeleted to see them anyway.
+   */
+  async findAll(includeDeleted = false) {
     return this.prisma.person.findMany({
+      where: includeDeleted ? {} : { status: { not: PersonStatus.ACCOUNT_DELETED } },
       include: { company: true, niche: true },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /** Total connection count including ACCOUNT_DELETED, to match LinkedIn's own count. */
+  async connectionCount() {
+    return this.prisma.person.count();
   }
 
   async findOne(id: string) {
