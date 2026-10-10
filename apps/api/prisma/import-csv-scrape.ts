@@ -1,0 +1,233 @@
+/**
+ * CSV Bulk Import — Step 1: diff + scrape
+ *
+ * Reads a LinkedIn Connections.csv. Rows with no name/URL but a connection
+ * date are closed/deleted LinkedIn accounts (LinkedIn only exports the date
+ * in that case) — those are upserted directly as ACCOUNT_DELETED (no Apify
+ * call needed, there's no profile to scrape) so the DB's total connection
+ * count matches LinkedIn's own count 1-1, while staying excluded from the
+ * normal contacts list (see ContactsService.findAll).
+ *
+ * Everything else is diffed against the DB: by default only rows whose
+ * linkedinUrl is NOT already present are scraped, so a later CSV export only
+ * costs Apify credits for genuinely new connections. Pass --force-all to
+ * re-scrape every row regardless (used once, for the 2026-10 backfill where
+ * most existing contacts were CSV-imported before Apify enrichment existed).
+ *
+ * New URLs are batched to the harvestapi actor (~50 per call, one Apify run
+ * per batch instead of one per profile) and written to a JSON file.
+ *
+ * Niche classification is deliberately NOT done here — see import-csv-apply.ts.
+ * The regex classifier in the old import-csv.ts only knew 2 niches and missed
+ * ambiguous cases (e.g. a "Head of People" at a law firm); niche assignment
+ * now happens by reading each profile's real headline/about/position, which
+ * Samuel does together with Claude in conversation before the apply step.
+ *
+ * Run from apps/api/:
+ *   npx ts-node prisma/import-csv-scrape.ts <path-to-csv> [--force-all] [--out=file.json]
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { PrismaClient, PersonStatus, PersonSource } from '@prisma/client';
+import { ApifyClient } from 'apify-client';
+import * as dotenv from 'dotenv';
+
+dotenv.config({ path: path.join(__dirname, '../../../.env') });
+
+const ACTOR_ID = 'LpVuK3Zozwuipa5bp'; // harvestapi/linkedin-profile-scraper
+// 10, not 50 — the actor itself caps free-tier runs at 10 items regardless
+// of how many queries are sent; a batch of 50 against a free account
+// returns 0 results for the whole batch ("free user item limit exceeded"),
+// confirmed against a real run on 2026-10-10.
+const BATCH_SIZE = 10;
+
+const prisma = new PrismaClient();
+
+// ─── CSV parser (same logic as the original import-csv.ts) ───────────────────
+
+function parseCSV(filePath: string): Array<Record<string, string>> {
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const lines = content.split(/\r?\n/);
+
+  const headerIdx = lines.findIndex(l => l.startsWith('First Name'));
+  if (headerIdx === -1) throw new Error('Could not find header row in CSV');
+
+  const headers = parseCSVLine(lines[headerIdx]);
+  const rows: Array<Record<string, string>> = [];
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const values = parseCSVLine(line);
+    if (values.length < headers.length) continue;
+    const row: Record<string, string> = {};
+    headers.forEach((h, idx) => { row[h.trim()] = (values[idx] ?? '').trim(); });
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+function parseLinkedInDate(str: string): Date | null {
+  if (!str || !str.trim()) return null;
+  const d = new Date(str.trim());
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const args = process.argv.slice(2);
+  const csvPath = args.find(a => !a.startsWith('--'));
+  const forceAll = args.includes('--force-all');
+  const outArg = args.find(a => a.startsWith('--out='));
+  const outPath = outArg ? outArg.slice('--out='.length) : path.join(__dirname, '../../tmp/csv-import-scraped.json');
+
+  if (!csvPath) {
+    console.error('Usage: npx ts-node prisma/import-csv-scrape.ts <path-to-csv> [--force-all] [--out=file.json]');
+    process.exit(1);
+  }
+  if (!fs.existsSync(csvPath)) {
+    console.error('CSV not found at:', csvPath);
+    process.exit(1);
+  }
+
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) {
+    console.error('APIFY_TOKEN not set in .env');
+    process.exit(1);
+  }
+
+  console.log('📂 Reading CSV:', csvPath);
+  const rows = parseCSV(csvPath);
+  console.log(`📊 Found ${rows.length} rows in CSV`);
+
+  // ─── Closed/deleted accounts: no name, no URL, only a connection date ────
+  // Upserted directly — there's no profile to scrape, and no stable natural
+  // key across re-exports (LinkedIn gives nothing but the date), so these
+  // are keyed on a synthetic URL derived from the date to stay idempotent
+  // across repeated runs of this same CSV rather than growing duplicates.
+  const closedRows = rows.filter(r => !r['URL']?.trim() && !r['First Name']?.trim());
+  let closedCreated = 0;
+  for (const row of closedRows) {
+    const connectedOn = parseLinkedInDate(row['Connected On']);
+    const syntheticUrl = `https://www.linkedin.com/in/deleted-account-${connectedOn ? connectedOn.toISOString() : 'unknown'}`;
+    const result = await prisma.person.upsert({
+      where: { linkedinUrl: syntheticUrl },
+      create: {
+        linkedinUrl: syntheticUrl,
+        firstName: 'LinkedIn',
+        lastName: 'Member (cuenta eliminada)',
+        status: PersonStatus.ACCOUNT_DELETED,
+        source: PersonSource.CSV_IMPORT,
+        linkedinConnectedOn: connectedOn,
+        tags: ['cuenta_cerrada'],
+      },
+      update: {}, // already recorded — nothing to refresh, there's no profile
+    });
+    if (result.createdAt.getTime() === result.updatedAt.getTime()) closedCreated++;
+  }
+  console.log(`🗑️  Closed/deleted accounts: ${closedRows.length} in CSV, ${closedCreated} newly recorded`);
+
+  // ─── Diff against DB: scrape only new connections, unless --force-all ───
+  const existing = await prisma.person.findMany({ select: { linkedinUrl: true } });
+  const existingUrls = new Set(existing.map(p => p.linkedinUrl));
+
+  const candidates = rows.filter(r => r['URL']?.trim() && r['First Name']?.trim());
+  const newCount = candidates.filter(r => !existingUrls.has(r['URL'].trim())).length;
+  const targetRows = forceAll ? candidates : candidates.filter(r => !existingUrls.has(r['URL'].trim()));
+
+  console.log(`✅ Already in DB: ${candidates.length - newCount}`);
+  console.log(`🆕 New connections: ${newCount}`);
+  console.log(forceAll
+    ? `🔁 --force-all: re-scraping all ${targetRows.length} connections regardless of DB state`
+    : `   Scraping only the new ones: ${targetRows.length}`);
+
+  if (targetRows.length === 0) {
+    console.log('Nothing to scrape — exiting.');
+    return;
+  }
+
+  // Keep the CSV's own fields alongside the scrape result, so the apply step
+  // can fall back to them (connectedOn date, raw company/position text) for
+  // anything Apify doesn't return.
+  const csvByUrl = new Map(targetRows.map(r => [r['URL'].trim(), {
+    firstName: r['First Name']?.trim() ?? '',
+    lastName: r['Last Name']?.trim() ?? '',
+    company: r['Company']?.trim() ?? '',
+    position: r['Position']?.trim() ?? '',
+    connectedOn: parseLinkedInDate(r['Connected On'])?.toISOString() ?? null,
+  }]));
+
+  const client = new ApifyClient({ token: apifyToken });
+  const urls = [...csvByUrl.keys()];
+  const scraped: Array<Record<string, unknown>> = [];
+  const failed: string[] = [];
+
+  for (let i = 0; i < urls.length; i += BATCH_SIZE) {
+    const batch = urls.slice(i, i + BATCH_SIZE);
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(urls.length / BATCH_SIZE);
+    console.log(`\n🔄 Batch ${batchNum}/${totalBatches} — scraping ${batch.length} profiles via Apify...`);
+
+    try {
+      const run = await client.actor(ACTOR_ID).call({
+        profileScraperMode: 'Profile details no email ($4 per 1k)',
+        queries: batch,
+      });
+      const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+      const returnedUrls = new Set<string>();
+      for (const item of items as Array<Record<string, unknown>>) {
+        const url = item.linkedinUrl as string | undefined;
+        if (url) returnedUrls.add(url);
+        scraped.push({ ...item, csvData: csvByUrl.get(url ?? '') ?? null });
+      }
+
+      const missing = batch.filter(u => !returnedUrls.has(u));
+      if (missing.length > 0) {
+        console.warn(`  ⚠️  ${missing.length} URL(s) in this batch returned no data`);
+        failed.push(...missing);
+      }
+      console.log(`  ✅ Batch ${batchNum} done — ${returnedUrls.size}/${batch.length} profiles scraped`);
+    } catch (err) {
+      console.error(`  ❌ Batch ${batchNum} failed entirely:`, (err as Error).message);
+      failed.push(...batch);
+    }
+  }
+
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, JSON.stringify({ scrapedAt: new Date().toISOString(), profiles: scraped, failedUrls: failed }, null, 2));
+
+  console.log(`\n✅ Scrape complete.`);
+  console.log(`   Scraped:  ${scraped.length}`);
+  console.log(`   Failed:   ${failed.length}`);
+  console.log(`\n📝 Written to: ${outPath}`);
+  console.log(`   Next: classify each profile's niche, then run import-csv-apply.ts with the classification.`);
+}
+
+main()
+  .catch(e => { console.error(e); process.exit(1); })
+  .finally(() => prisma.$disconnect());

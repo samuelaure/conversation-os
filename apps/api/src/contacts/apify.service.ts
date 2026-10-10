@@ -26,6 +26,27 @@ export class ApifyService {
 
     return items[0] as unknown as LinkedInProfileRaw;
   }
+
+  /**
+   * Scrapes multiple LinkedIn profiles in a single Apify run (one actor call,
+   * not one per URL — avoids per-profile run overhead for bulk CSV imports).
+   * Returns a Map keyed by the input URL so callers can line results back up
+   * even if the actor returns them in a different order or drops a failed one.
+   */
+  async scrapeLinkedInProfiles(linkedinUrls: string[]): Promise<Map<string, LinkedInProfileRaw>> {
+    const run = await this.client.actor(ACTOR_ID).call({
+      profileScraperMode: "Profile details no email ($4 per 1k)",
+      queries: linkedinUrls,
+    });
+
+    const { items } = await this.client.dataset(run.defaultDatasetId).listItems();
+
+    const byUrl = new Map<string, LinkedInProfileRaw>();
+    for (const item of items as unknown as LinkedInProfileRaw[]) {
+      if (item?.linkedinUrl) byUrl.set(item.linkedinUrl, item);
+    }
+    return byUrl;
+  }
 }
 
 // Minimal typing based on the harvestapi output we know
