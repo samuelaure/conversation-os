@@ -90,10 +90,33 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
+const MONTHS: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+/**
+ * LinkedIn's export format is always "DD Mon YYYY" (e.g. "17 Mar 2023").
+ * `new Date(str)` parses that in the PROCESS's local timezone, so the same
+ * CSV date produces a different UTC instant — and therefore a different
+ * .toISOString() — depending on what machine/timezone runs this script.
+ * Confirmed real: the dedup-by-date-key logic below compared a date parsed
+ * this way against the same date already stored in the DB from an earlier
+ * run, got two different strings for the same CSV row, and created a
+ * duplicate ACCOUNT_DELETED row (2026-10-11 incident, the "fix" that didn't
+ * actually fix it because both sides shared the same timezone leak). Build
+ * the UTC midnight instant directly from the parsed day/month/year instead
+ * of handing an ambiguous string to the Date constructor.
+ */
 function parseLinkedInDate(str: string): Date | null {
   if (!str || !str.trim()) return null;
-  const d = new Date(str.trim());
-  return isNaN(d.getTime()) ? null : d;
+  const m = str.trim().match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10);
+  const month = MONTHS[m[2].toLowerCase()];
+  const year = parseInt(m[3], 10);
+  if (month === undefined) return null;
+  return new Date(Date.UTC(year, month, day));
 }
 
 /**
@@ -144,12 +167,31 @@ async function main() {
   // across repeated runs of this same CSV rather than growing duplicates.
   const closedRows = rows.filter(r => !r['URL']?.trim() && !r['First Name']?.trim());
   let closedCreated = 0;
+  // Match against EXISTING ACCOUNT_DELETED rows by connectedOn date, not by
+  // re-deriving the same synthetic URL — the synthetic URL scheme has already
+  // changed once (line-number-based, then timestamp-based), and a Date's
+  // ISO string also shifts with the process's local timezone, so re-deriving
+  // it is not a stable key across runs. Confirmed real: two different
+  // synthetic URLs were generated for the identical CSV row on two different
+  // runs, duplicating the same closed account (2026-10-11 incident). Querying
+  // by the actual date column is the only thing both past and future runs
+  // agree on.
+  const existingClosed = await prisma.person.findMany({
+    where: { status: PersonStatus.ACCOUNT_DELETED },
+    select: { id: true, linkedinConnectedOn: true },
+  });
+  const existingClosedDates = new Set(
+    existingClosed.map(p => p.linkedinConnectedOn?.toISOString().slice(0, 10)).filter(Boolean),
+  );
   for (const row of closedRows) {
     const connectedOn = parseLinkedInDate(row['Connected On']);
-    const syntheticUrl = `https://www.linkedin.com/in/deleted-account-${connectedOn ? connectedOn.toISOString() : 'unknown'}`;
-    const result = await prisma.person.upsert({
-      where: { linkedinUrl: syntheticUrl },
-      create: {
+    const dateKey = connectedOn?.toISOString().slice(0, 10);
+    if (dateKey && existingClosedDates.has(dateKey)) continue; // already recorded
+
+    const syntheticUrl = `https://www.linkedin.com/in/deleted-account-${row['Connected On']?.trim() || 'unknown'}`
+      .toLowerCase().replace(/\s+/g, '-');
+    await prisma.person.create({
+      data: {
         linkedinUrl: syntheticUrl,
         firstName: 'LinkedIn',
         lastName: 'Member (cuenta eliminada)',
@@ -158,9 +200,9 @@ async function main() {
         linkedinConnectedOn: connectedOn,
         tags: ['cuenta_cerrada'],
       },
-      update: {}, // already recorded — nothing to refresh, there's no profile
     });
-    if (result.createdAt.getTime() === result.updatedAt.getTime()) closedCreated++;
+    if (dateKey) existingClosedDates.add(dateKey);
+    closedCreated++;
   }
   console.log(`🗑️  Closed/deleted accounts: ${closedRows.length} in CSV, ${closedCreated} newly recorded`);
 
